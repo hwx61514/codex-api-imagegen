@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -12,6 +14,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import unittest
 from unittest.mock import patch
+import urllib.error
 import zlib
 
 SCRIPT = Path(__file__).resolve().parents[1] / "skills/codex-api-imagegen/scripts/imagegen.py"
@@ -192,6 +195,80 @@ class ConfigTests(unittest.TestCase):
                 imagegen.image_info(data)
 
 
+class TransportFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out = Path(self.temp.name) / "image.png"
+        self.connection = {"endpoint": "https://relay.example.test/v1/responses",
+                           "headers": {"Authorization": "Bearer " + TEST_KEY}, "secrets": [TEST_KEY]}
+
+    def failed_open(self, error):
+        with patch.object(imagegen.urllib.request, "build_opener") as factory:
+            factory.return_value.open.side_effect = error
+            with self.assertRaises(imagegen.SkillError) as raised:
+                imagegen.generate(self.connection, imagegen.make_payload("test"), self.out)
+            factory.return_value.open.assert_called_once()
+        self.assertFalse(self.out.exists())
+        message = str(raised.exception)
+        self.assertNotIn(TEST_KEY, message)
+        self.assertNotIn("relay.example.test", message)
+        return message
+
+    def test_dns_failure_is_known_to_precede_submission(self):
+        message = self.failed_open(urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, TEST_KEY)))
+        self.assertIn("DNS lookup failed", message)
+        self.assertIn("No image-generation request was sent", message)
+        self.assertIn("network permission", message)
+        self.assertNotIn("uncertain", message)
+
+    def test_dns_failure_through_urlopen_never_opens_a_connection(self):
+        with patch.object(socket, "getaddrinfo", side_effect=socket.gaierror(socket.EAI_NONAME, TEST_KEY)) as dns, \
+                patch.object(socket.socket, "connect") as connect:
+            with self.assertRaisesRegex(imagegen.SkillError, "No image-generation request was sent") as raised:
+                imagegen.generate(self.connection, imagegen.make_payload("test"), self.out)
+            dns.assert_called_once()
+            connect.assert_not_called()
+        self.assertFalse(self.out.exists())
+        self.assertNotIn(TEST_KEY, str(raised.exception))
+
+    def test_denied_connection_identifies_permission_requirement(self):
+        message = self.failed_open(urllib.error.URLError(PermissionError(1, TEST_KEY)))
+        self.assertIn("local permissions", message)
+        self.assertIn("No image-generation request was sent", message)
+
+    def test_refused_connection_does_not_claim_a_paid_submission(self):
+        message = self.failed_open(urllib.error.URLError(ConnectionRefusedError(TEST_KEY)))
+        self.assertIn("connection was refused", message)
+        self.assertIn("No image-generation request was sent", message)
+
+    def test_certificate_failure_keeps_verification_enabled(self):
+        message = self.failed_open(urllib.error.URLError(ssl.SSLCertVerificationError(1, TEST_KEY)))
+        self.assertIn("before the image-generation request was sent", message)
+        self.assertIn("do not disable certificate verification", message)
+
+    def test_timeout_and_unknown_transport_never_claim_safe_resubmission(self):
+        for error in [TimeoutError(TEST_KEY), urllib.error.URLError(TimeoutError(TEST_KEY)),
+                      urllib.error.URLError(TEST_KEY), OSError(TEST_KEY),
+                      urllib.error.URLError(ssl.SSLError(1, TEST_KEY))]:
+            with self.subTest(error=type(error).__name__):
+                message = self.failed_open(error)
+                self.assertIn("uncertain", message)
+                self.assertIn("do not automatically resubmit", message)
+                self.assertNotIn("No image-generation request was sent", message)
+
+    def test_failure_after_headers_cannot_be_called_unsubmitted(self):
+        with patch.object(imagegen.urllib.request, "build_opener") as factory:
+            response = factory.return_value.open.return_value.__enter__.return_value
+            response.headers = {"Content-Type": "text/event-stream"}
+            response.readline.side_effect = urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, TEST_KEY))
+            with self.assertRaisesRegex(imagegen.SkillError, "uncertain") as raised:
+                imagegen.generate(self.connection, imagegen.make_payload("test"), self.out)
+            factory.return_value.open.assert_called_once()
+        self.assertNotIn("No image-generation request was sent", str(raised.exception))
+        self.assertNotIn(TEST_KEY, str(raised.exception))
+
+
 class EndToEndTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="imagegen tests ")
@@ -327,6 +404,18 @@ class EndToEndTests(unittest.TestCase):
             with self.assertRaisesRegex(imagegen.SkillError, "limits"):
                 imagegen.generate(connection, imagegen.make_payload("test"), self.out)
         self.assertEqual(len(received), 1)
+
+    def test_local_save_failure_is_distinct_from_connection_permission(self):
+        with fake_api() as (base, received), patch.object(imagegen, "save_image", side_effect=PermissionError(TEST_KEY)):
+            connection = {"endpoint": base + "/v1/responses", "headers": {}, "secrets": [TEST_KEY]}
+            with self.assertRaises(imagegen.SkillError) as raised:
+                imagegen.generate(connection, imagegen.make_payload("test"), self.out)
+        self.assertEqual(len(received), 1)
+        message = str(raised.exception)
+        self.assertIn("file I/O failed", message)
+        self.assertIn("uncertain", message)
+        self.assertNotIn("No image-generation request was sent", message)
+        self.assertNotIn(TEST_KEY, message)
 
     def test_inspect_does_not_make_an_api_request_or_print_key(self):
         with fake_api() as (base, received):

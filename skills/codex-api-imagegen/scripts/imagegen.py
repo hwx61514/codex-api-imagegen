@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
+import ssl
 import struct
 import sys
 import tempfile
@@ -284,6 +286,7 @@ def generate(connection, payload, out, timeout=240):
     images, seen = [], set()
     completed = False
     response_id = None
+    response_received = False
 
     def consume(item):
         if not isinstance(item, dict) or item.get("type") != "image_generation_call" or not item.get("result"):
@@ -326,6 +329,7 @@ def generate(connection, payload, out, timeout=240):
                                      headers=connection["headers"], method="POST")
     try:
         with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+            response_received = True
             if "text/event-stream" in response.headers.get("Content-Type", ""):
                 for data in response_events(response, timeout):
                     event(data)
@@ -341,8 +345,22 @@ def generate(connection, payload, out, timeout=240):
         detail = api_error(error.read(16384), connection["secrets"])
         suffix = " Result is uncertain; do not automatically resubmit." if error.code >= 500 else " No automatic retry was made."
         raise SkillError(f"API HTTP {error.code}: {detail}.{suffix}") from None
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise SkillError("Connection or file I/O failed. Result may be uncertain; do not automatically resubmit. Preserve any saved images.") from None
+    except urllib.error.URLError as error:
+        reason = error.reason
+        if not response_received:
+            if isinstance(reason, socket.gaierror):
+                raise SkillError("DNS lookup failed before an API connection was established. No image-generation request was sent. Check DNS/provider configuration; if network access is restricted, request the required network permission before trying again.") from None
+            if isinstance(reason, PermissionError):
+                raise SkillError("Network connection was blocked by local permissions before an API connection was established. No image-generation request was sent. Request the required network permission before trying again.") from None
+            if isinstance(reason, ConnectionRefusedError):
+                raise SkillError("API connection was refused. No image-generation request was sent. Check provider availability and network access before trying again.") from None
+            if isinstance(reason, ssl.SSLCertVerificationError):
+                raise SkillError("TLS certificate verification failed before the image-generation request was sent. Check the provider certificate or local trust configuration; do not disable certificate verification.") from None
+        raise SkillError("API transport failed. Result may be uncertain; do not automatically resubmit. Preserve any saved images.") from None
+    except TimeoutError:
+        raise SkillError("API request timed out. Result may be uncertain; do not automatically resubmit. Preserve any saved images.") from None
+    except OSError:
+        raise SkillError("Response transport or file I/O failed. Result may be uncertain; do not automatically resubmit. Preserve any saved images.") from None
     except (ValueError, UnicodeError, binascii.Error):
         raise SkillError("API returned malformed image/event data. Do not automatically resubmit. Preserve any saved images.") from None
     if not completed:
