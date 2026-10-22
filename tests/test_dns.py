@@ -24,6 +24,14 @@ def response_socket(body, status=200):
     return sock
 
 
+def proxy_environment(**values):
+    # Retain OS/trust-store variables needed by Windows HTTPS initialization.
+    environment = {key: value for key, value in os.environ.items()
+                   if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}}
+    environment.update(values)
+    return patch.dict(os.environ, environment, clear=True)
+
+
 class DNSLookupTests(unittest.TestCase):
     def test_local_names_and_ip_literals_never_leave_system_resolver(self):
         for host in ["localhost", "relay", "relay.local", "relay.internal", "relay.lan",
@@ -161,7 +169,7 @@ class DNSConnectionTests(unittest.TestCase):
         body = json.dumps({"id": "resp_test", "status": "completed", "output": [image_item()]}).encode()
         self.sock = response_socket(body)
         self.tls = []
-        self.env = patch.dict(os.environ, {"NO_PROXY": "*"}, clear=True)
+        self.env = proxy_environment(NO_PROXY="*")
         self.env.start()
         self.addCleanup(self.env.stop)
 
@@ -260,7 +268,7 @@ class DNSConnectionTests(unittest.TestCase):
         self.sock.sendall.assert_not_called()
 
     def test_failed_proxy_dns_is_not_replaced_by_direct_provider_connection(self):
-        with patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy.example.net:8080", "NO_PROXY": ""}, clear=True), \
+        with proxy_environment(HTTPS_PROXY="http://proxy.example.net:8080", NO_PROXY=""), \
                 patch.object(socket, "create_connection", side_effect=socket.gaierror()) as connect, \
                 patch.object(imagegen, "fallback_dns") as lookup:
             with self.assertRaisesRegex(imagegen.SkillError, "No image-generation request was sent"):
@@ -269,7 +277,7 @@ class DNSConnectionTests(unittest.TestCase):
         self.assertEqual(connect.call_args.args[0], ("proxy.example.net", 8080))
 
     def test_no_proxy_retains_direct_provider_fallback(self):
-        with patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy.example.net:8080", "NO_PROXY": "api.example.com"}, clear=True), \
+        with proxy_environment(HTTPS_PROXY="http://proxy.example.net:8080", NO_PROXY="api.example.com"), \
                 patch.object(socket, "create_connection", side_effect=[socket.gaierror(), self.sock]) as connect, \
                 patch.object(ssl.SSLContext, "wrap_socket", new=lambda context, sock, **kw: self.wrap(context, sock, **kw)), \
                 patch.object(imagegen, "fallback_dns", return_value=(["1.1.1.1"], "global")) as lookup:
