@@ -6,6 +6,21 @@
 
 ## 安装
 
+把下面这句话连同项目地址发给 Codex，即可让它按照本页说明安装：
+
+> 帮我安装这个 Codex 生图 skill：https://github.com/hwx61514/codex-api-imagegen ，请阅读 README，将 skills/codex-api-imagegen 安装到我的用户级 skills 目录，检查 Python 3.11+ 和本机 API 配置。安装时不要提交付费生图请求，也不要输出我的 key 或私人端点。
+
+公开仓库下载无需 GitHub 账号或作者授权。生图使用安装者自己的 API 配置和额度；需要接口支持默认模型及图片工具，安装成功不代表上游一定有生图权限。
+
+### 给 AI 的安装步骤
+
+1. 本仓库的 skill 位于 `skills/codex-api-imagegen`，不是仓库根目录。先阅读其中的 `SKILL.md`。有内置 `skill-installer` 时，使用其安装脚本并传入 `--repo hwx61514/codex-api-imagegen --path skills/codex-api-imagegen`。
+2. 没有安装器时，下载或克隆公开仓库，将该子目录复制到本机 Codex 识别的用户级 skills 目录；本项目在 `$CODEX_HOME/skills`（未设置时 `~/.codex/skills`）验证过。不同客户端以其内置安装器和实际发现路径为准。已有同名目录先检查和备份，避免覆盖用户修改或形成重复嵌套。
+3. 找到 Python 3.11+（可用客户端自带运行时）。执行已安装脚本的 `--help`，再执行 `inspect` 检查配置来源。只向用户报告检查状态，勿转发其中的私人 endpoint。缺少运行时或接口配置时说明缺项，不索取聊天中的 key，不改变聊天模型或接口配置。
+4. 确认安装目录含 `SKILL.md`、`agents/openai.yaml`、`scripts/imagegen.py`。若客户端未发现 skill，新开聊天或重启客户端；明确调用 `$codex-api-imagegen`。仅安装时不进行付费生图测试。
+
+### 手动安装
+
 将本仓库的 `skills/codex-api-imagegen` 文件夹复制到本机 Codex 的 `skills` 目录。默认位置为用户目录下的 `.codex/skills`；设置过 `CODEX_HOME` 则使用该目录下的 `skills`。安装后新开一个 Codex 聊天，让它发现新 skill。
 
 macOS / Linux，在本仓库目录运行：
