@@ -201,7 +201,8 @@ class TransportFailureTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.out = Path(self.temp.name) / "image.png"
         self.connection = {"endpoint": "https://relay.example.test/v1/responses",
-                           "headers": {"Authorization": "Bearer " + TEST_KEY}, "secrets": [TEST_KEY]}
+                           "headers": {"Authorization": "Bearer " + TEST_KEY}, "secrets": [TEST_KEY],
+                           "dns_mode": "system"}
 
     def failed_open(self, error):
         with patch.object(imagegen.urllib.request, "build_opener") as factory:

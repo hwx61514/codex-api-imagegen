@@ -63,12 +63,27 @@ python3 skills/codex-api-imagegen/scripts/imagegen.py edit --image photo.png --p
 
 可选参数：`--prompt-file` 读取 UTF-8 提示词、`--image` 可重复三次、`--size`、`--quality low|medium|high|auto`、`--output-format png|jpeg|webp`、`--timeout`。`--model` 与 `--image-model` 仅在明确需要切换时使用。`--codex-home` / `--profile` 可选择其它本地 Codex 配置；它们必须来自用户可信配置。
 
+### 国内与海外 DNS
+
+默认 `--dns auto`：先沿用系统 DNS 和代理。仅当直接连接公网 API 域名时系统解析失败，才并行查询阿里 DNS（国内）和 Cloudflare（海外）的加密 DNS，采用先返回有效结果的一路。系统正常时不增加查询，不按用户所在地固定 DNS。备用解析约有 4 秒预算，之后连接备用 IP 也有限时；不会一直等待不可用的来源。
+
+| 参数 | 系统解析失败后的行为 |
+| --- | --- |
+| `--dns auto` | 国内、海外来源并行兜底，默认 |
+| `--dns cn` | 只用阿里 DNS 兜底 |
+| `--dns global` | 只用 Cloudflare 兜底 |
+| `--dns system` | 仅使用系统解析，关闭第三方 DNS 查询 |
+
+备用 DNS 仅接收待解析的 API 域名，不发送 API key、提示词或图片。本机地址、IP 字面量及常见内部/保留后缀不外查，只接受公网 IP 结果；使用内部自定义域名或不希望域名交给第三方时选 `--dns system`。HTTPS 继续使用原 API 域名校验证书、发送 SNI 和 Host；不修改系统 DNS、API 地址或证书设置。已有代理及 `NO_PROXY` 沿用，代理主机解析失败时不会绕过代理直连。
+
+这是连接前的解析兜底，不会重发已提交的生图请求。网络权限限制、代理故障、证书错误、服务端故障及区域访问限制仍需处理，不能保证任意地区永不报错。国内 DNS 不等于国内可访问任意海外 API。
+
 ## 读取哪些配置
 
 1. 从 `CODEX_HOME/config.toml` 或 `~/.codex/config.toml` 找到活动 profile 和 `model_provider`。
 2. 使用对应 provider 的 `base_url` 和认证信息，支持 `env_key`、`experimental_bearer_token`。官方 provider 或 `requires_openai_auth=true` 的 provider 还支持 `OPENAI_API_KEY` 环境变量及 `auth.json` 中的 API Key。
 3. 支持普通自定义 `http_headers` / `env_http_headers`；保留的认证及 HTTP 结构头必须使用正式配置字段，不能用重复 header 覆盖。
-4. 请求只发到该 provider。域名根地址补 `/v1/responses`，已有 API 前缀后追加 `/responses`，禁止重定向。HTTPS 为默认要求，仅本机回环测试允许 HTTP。
+4. 生图请求只发到该 provider。域名根地址补 `/v1/responses`，已有 API 前缀后追加 `/responses`，禁止重定向。HTTPS 为默认要求，仅本机回环测试允许 HTTP；仅在系统解析失败后才可能发出上述备用 DNS 查询。
 
 不读取或复用 ChatGPT 登录的 OAuth token，不执行配置里的外部取 key 命令，不把 key 写进源码、参数或输出。`inspect` 只显示来源，不显示值。`inspect` 结果中的自定义 endpoint 可能是私人地址，请勿把个人运行输出上传到公开仓库。
 
@@ -90,6 +105,6 @@ python3 skills/codex-api-imagegen/scripts/imagegen.py edit --image photo.png --p
 python3 -m unittest discover -s tests -v
 ```
 
-测试通过隔离配置和本机 HTTP 服务覆盖认证选择、实际请求、SSE / JSON、参考图顺序、无图及断流、拒绝重定向、防覆盖、脱敏和单次提交；不会使用个人 key 或访问付费接口。GitHub Actions 在 Windows 和 Linux 的 Python 3.11 / 3.13 上执行相同测试。
+测试通过隔离配置和本机 HTTP 服务覆盖认证选择、实际请求、SSE / JSON、参考图顺序、无图及断流、拒绝重定向、防覆盖、脱敏和单次提交；另模拟 DNS 竞速、失败期限、公网 IP 过滤、HTTPS 原域名及代理保留，不会使用个人 key 或访问付费接口。GitHub Actions 在 Windows 和 Linux 的 Python 3.11 / 3.13 上执行相同测试。
 
 协议参考：[官方图片生成指南](https://developers.openai.com/api/docs/guides/image-generation)。

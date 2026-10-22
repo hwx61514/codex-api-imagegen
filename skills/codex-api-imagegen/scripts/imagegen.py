@@ -4,7 +4,10 @@
 import argparse
 import base64
 import binascii
+import concurrent.futures
 import hashlib
+import http.client
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -26,6 +29,11 @@ DEFAULT_IMAGE_MODEL = "gpt-image-2"
 MAX_IMAGE = 32 * 1024 * 1024
 MAX_EVENT = 48 * 1024 * 1024
 MAX_RESPONSE = 192 * 1024 * 1024
+DNS_BUDGET = 4
+DNS_RESOLVERS = {
+    "cn": ("dns.alidns.com", "/resolve", ("223.5.5.5", "2400:3200::1")),
+    "global": ("cloudflare-dns.com", "/dns-query", ("1.1.1.1", "2606:4700:4700::1111")),
+}
 
 
 class SkillError(Exception):
@@ -210,6 +218,160 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def public_dns_hostname(host):
+    host = host.rstrip(".").lower()
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    if "." not in host or host.endswith((".local", ".localhost", ".internal", ".lan", ".home", ".corp", ".arpa", ".test", ".invalid", ".example", ".onion")):
+        return None
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+
+
+def dns_addresses(data, hostname, rrtype):
+    if not isinstance(data, dict) or data.get("Status") != 0:
+        return []
+    answers = data.get("Answer", [])
+    if not isinstance(answers, list) or len(answers) > 128:
+        return []
+    names = {hostname.rstrip(".").lower()}
+    for _ in range(8):
+        for answer in answers:
+            if isinstance(answer, dict) and answer.get("type") == 5 and str(answer.get("name", "")).rstrip(".").lower() in names:
+                names.add(str(answer.get("data", "")).rstrip(".").lower())
+    result = []
+    for answer in answers:
+        if not isinstance(answer, dict) or answer.get("type") != rrtype or str(answer.get("name", "")).rstrip(".").lower() not in names:
+            continue
+        if not isinstance(answer.get("data"), str):
+            continue
+        try:
+            address = ipaddress.ip_address(answer.get("data", ""))
+        except ValueError:
+            continue
+        if address.version == (4 if rrtype == 1 else 6) and address.is_global and not address.is_multicast:
+            value = str(address)
+            if value not in result:
+                result.append(value)
+    return result
+
+
+def query_dns_resolver(source, hostname, deadline):
+    server, path, bootstraps = DNS_RESOLVERS[source]
+    addresses = []
+    for rrtype in (1, 28):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        connection = http.client.HTTPSConnection(server, timeout=min(2, remaining))
+
+        def bootstrap(address, timeout, source_address=None):
+            for ip in bootstraps:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    sock = socket.create_connection((ip, 443), min(1, remaining), source_address)
+                    sock.settimeout(min(2, max(0.01, deadline - time.monotonic())))
+                    return sock
+                except OSError:
+                    continue
+            raise TimeoutError("DNS resolver unavailable.")
+
+        # Connect via public bootstrap IP, retaining resolver TLS SNI and validation.
+        connection._create_connection = bootstrap
+        try:
+            query = urllib.parse.urlencode({"name": hostname, "type": rrtype})
+            connection.request("GET", path + "?" + query, headers={"Accept": "application/dns-json"})
+            response = connection.getresponse()
+            if response.status != 200:
+                continue
+            chunks, size = [], 0
+            while time.monotonic() < deadline:
+                chunk = response.read1(8192)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > 65536:
+                    raise ValueError("Oversized DNS response.")
+                chunks.append(chunk)
+            else:
+                raise TimeoutError("DNS deadline exceeded.")
+            addresses.extend(dns_addresses(json.loads(b"".join(chunks)), hostname, rrtype))
+        except (OSError, ValueError, http.client.HTTPException):
+            continue
+        finally:
+            connection.close()
+    return addresses
+
+
+def fallback_dns(hostname, mode="auto", budget=DNS_BUDGET):
+    hostname = public_dns_hostname(hostname)
+    if mode == "system" or not hostname:
+        return [], None
+    sources = ("cn", "global") if mode == "auto" else (mode,)
+    deadline = time.monotonic() + budget
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(sources))
+    pending = {pool.submit(query_dns_resolver, source, hostname, deadline): source for source in sources}
+    try:
+        for future in concurrent.futures.as_completed(pending, timeout=budget):
+            try:
+                addresses = future.result()
+            except (OSError, ValueError, http.client.HTTPException):
+                continue
+            if addresses:
+                return addresses, pending[future]
+    except TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return [], None
+
+
+class ProviderHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, provider_host, dns_mode):
+        super().__init__()
+        self.provider_host = provider_host.lower()
+        self.dns_mode = dns_mode
+
+    def https_open(self, request):
+        def connection(host, **kwargs):
+            client = http.client.HTTPSConnection(host, **kwargs)
+            original = client._create_connection
+
+            def connect(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+                try:
+                    return original(address, timeout, source_address)
+                except socket.gaierror as failure:
+                    # HTTPS proxies resolve the target themselves; preserve their routing.
+                    if client._tunnel_host or address[0].lower() != self.provider_host:
+                        raise
+                    addresses, source = fallback_dns(address[0], self.dns_mode)
+                    deadline = time.monotonic() + DNS_BUDGET
+                    for ip in addresses[:4]:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        try:
+                            sock = socket.create_connection((ip, address[1]), min(1, remaining), source_address)
+                            sock.settimeout(timeout)
+                            print("System DNS unavailable; encrypted DNS fallback connected (" + source + ").", file=sys.stderr, flush=True)
+                            return sock
+                        except OSError:
+                            continue
+                    raise failure from None
+
+            client._create_connection = connect
+            return client
+
+        return self.do_open(connection, request, context=self._context)
+
+
 def api_error(error, secrets):
     try:
         obj = error if isinstance(error, dict) else json.loads(error)
@@ -328,7 +490,11 @@ def generate(connection, payload, out, timeout=240):
     request = urllib.request.Request(connection["endpoint"], data=json.dumps(payload).encode("utf-8"),
                                      headers=connection["headers"], method="POST")
     try:
-        with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+        handlers = [NoRedirect()]
+        dns_mode = connection.get("dns_mode", "auto")
+        if dns_mode != "system":
+            handlers.append(ProviderHTTPSHandler(urllib.parse.urlsplit(connection["endpoint"]).hostname, dns_mode))
+        with urllib.request.build_opener(*handlers).open(request, timeout=timeout) as response:
             response_received = True
             if "text/event-stream" in response.headers.get("Content-Type", ""):
                 for data in response_events(response, timeout):
@@ -391,9 +557,12 @@ def main(argv=None):
     parser.add_argument("--quality", choices=["auto", "low", "medium", "high"], default="medium")
     parser.add_argument("--output-format", choices=["png", "jpeg", "webp"], default="png")
     parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument("--dns", choices=["auto", "system", "cn", "global"], default="auto",
+                        help="After system DNS fails: race cn/global (auto), use one source, or disable fallback (system)")
     args = parser.parse_args(argv)
     try:
         connection = resolve_connection(args.codex_home, args.profile)
+        connection["dns_mode"] = args.dns
         if args.command == "inspect":
             print(json.dumps({k: connection[k] for k in ["provider", "profile", "endpoint", "key_source"]}, ensure_ascii=False))
             return 0
