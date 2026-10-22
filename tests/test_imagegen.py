@@ -78,9 +78,13 @@ def fake_api(mode="sse", callback=None):
                       {"type": "response.output_item.done", "item": response["output"][0]}]
             if mode != "disconnect":
                 events.append({"type": "response.completed", "response": response})
-            for event in events:
-                self.wfile.write((": keepalive\n\ndata: " + json.dumps(event) + "\n\n").encode())
-            self.wfile.write(b"data: [DONE]\n\n")
+            try:
+                for event in events:
+                    self.wfile.write((": keepalive\n\ndata: " + json.dumps(event) + "\n\n").encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+            except (BrokenPipeError, ConnectionResetError):
+                # Response-limit tests deliberately close the client early.
+                pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -267,7 +271,8 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(len(received), 1)
         self.assertEqual(self.out.read_bytes(), png())
         self.assertIn("uncertain", result.stderr)
-        self.assertIn(str(self.out), result.stdout)
+        saved = json.loads(result.stdout.splitlines()[0])["saved_image"]
+        self.assertEqual(Path(saved["path"]).resolve(), self.out.resolve())
         self.assert_clean(result)
 
     def test_redirect_does_not_forward_authentication(self):
