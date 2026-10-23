@@ -42,6 +42,8 @@ Copy-Item -Recurse '.\skills\codex-api-imagegen' (Join-Path $skillHome 'skills')
 
 ## 在 Codex 里使用
 
+通过Codex API接入且当前会话没有可调用的内置图片生成工具时，普通生图/改图请求直接使用本skill，无需先尝试通用imagegen技能或探测其它入口。技能位置按会话提供的准确路径读取，不猜插件缓存目录；用户明确指定其他技能或工具时遵循其选择。
+
 直接请求生图，或明确调用：
 
 > 使用 $codex-api-imagegen，生成一张白色背景上的红苹果产品照片。
