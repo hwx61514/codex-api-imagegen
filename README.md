@@ -50,13 +50,13 @@ Copy-Item -Recurse '.\skills\codex-api-imagegen' (Join-Path $skillHome 'skills')
 
 图片编辑须让 Codex 能访问原图文件。脚本支持一至三张独立参考图。默认不会改变你的聊天模型或服务器配置。
 
+日常使用直接生成、成功后直接展示图片；复用已知Python运行时，不先重复inspect、帮助或版本检查，也不默认额外打开验图。仅安装、实际错误或用户要求检查时诊断。等待同一次请求，不自动重发，不为提速擅自降低画质或切换模型。
+
 ## 直接运行
 
-先确认 Python 版本。下面使用 `python3`；Windows 可替换为 `py -3.11` 或已安装的 Python 3.11+ 命令。
+使用已知可用的 Python 3.11+ 直接执行；首次安装才检查运行时和配置。下面使用 `python3`；Windows 可替换为 `py -3.11` 或已安装的 Python 3.11+ 命令。
 
 ```sh
-python3 --version
-python3 skills/codex-api-imagegen/scripts/imagegen.py inspect
 python3 skills/codex-api-imagegen/scripts/imagegen.py generate --prompt "白底红苹果产品照片" --out output/imagegen/apple.png
 python3 skills/codex-api-imagegen/scripts/imagegen.py edit --image photo.png --prompt "只把背景改为浅灰，主体不变" --out output/imagegen/edited.png
 ```
